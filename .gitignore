@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project specific
+known_faces/
+face_encodings/
+*.pkl
+*.db
+
+# OS specific
+.DS_Store
+Thumbs.db 
