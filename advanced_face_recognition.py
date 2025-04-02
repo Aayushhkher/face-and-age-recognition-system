@@ -4,6 +4,9 @@ import os
 import time
 from datetime import datetime
 import pickle
+import urllib.request
+import ssl
+import requests
 
 class AdvancedFaceDetector:
     def __init__(self):
@@ -19,6 +22,11 @@ class AdvancedFaceDetector:
         # Create directories if they don't exist
         os.makedirs('known_faces', exist_ok=True)
         os.makedirs('face_encodings', exist_ok=True)
+        os.makedirs('models', exist_ok=True)
+        
+        # Initialize age detection smoothing
+        self.age_history = []
+        self.max_history = 5  # Keep last 5 age estimates for smoothing
     
     def load_known_faces(self):
         """Load known face images and names from files."""
@@ -69,72 +77,119 @@ class AdvancedFaceDetector:
         faces = self.face_cascade.detectMultiScale(gray, 1.1, 4)
         return faces, gray
     
+    def download_age_model(self):
+        """Download the pre-trained age detection model."""
+        # Create an unverified context for HTTPS
+        ssl._create_default_https_context = ssl._create_unverified_context
+        
+        # URLs for the age detection model files (using a more reliable mirror)
+        age_model_url = "https://raw.githubusercontent.com/opencv/opencv_extra/master/testdata/dnn/age_net.caffemodel"
+        age_proto_url = "https://raw.githubusercontent.com/opencv/opencv_extra/master/testdata/dnn/age_deploy.prototxt"
+        
+        # Download the files using requests
+        print("Downloading age detection model files...")
+        
+        # Download caffemodel
+        print("Downloading age_net.caffemodel...")
+        response = requests.get(age_model_url, verify=False)
+        with open('models/age_net.caffemodel', 'wb') as f:
+            f.write(response.content)
+        
+        # Download prototxt
+        print("Downloading age_deploy.prototxt...")
+        response = requests.get(age_proto_url, verify=False)
+        with open('models/age_deploy.prototxt', 'wb') as f:
+            f.write(response.content)
+        
+        print("Age detection model files downloaded successfully!")
+    
     def estimate_age(self, face_img):
-        """Estimate age range based on advanced facial features analysis."""
+        """Estimate age using optimized computer vision techniques."""
+        # Resize image for faster processing while maintaining aspect ratio
+        max_size = 200
+        height, width = face_img.shape[:2]
+        scale = max_size / max(height, width)
+        face_img = cv2.resize(face_img, (int(width * scale), int(height * scale)))
+        
         # Convert to grayscale and normalize
         gray = cv2.cvtColor(face_img, cv2.COLOR_BGR2GRAY)
         normalized = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
         
-        # Multi-scale edge detection for better wrinkle analysis
-        edges_fine = cv2.Canny(normalized, 20, 50)  # Fine details
-        edges_coarse = cv2.Canny(normalized, 50, 150)  # Coarse details
+        # Enhanced edge analysis with multiple scales
+        edges_1 = cv2.Canny(normalized, 50, 150)
+        edges_2 = cv2.Canny(normalized, 100, 200)
+        edge_density = (np.sum(edges_1) + np.sum(edges_2)) / (2 * edges_1.shape[0] * edges_1.shape[1] * 255.0)
         
-        # Calculate edge densities at different scales
-        edge_density_fine = np.sum(edges_fine) / (edges_fine.shape[0] * edges_fine.shape[1])
-        edge_density_coarse = np.sum(edges_coarse) / (edges_coarse.shape[0] * edges_coarse.shape[1])
+        # Multi-scale texture analysis using Gabor filters
+        kernels = [
+            cv2.getGaborKernel((21, 21), 3.0, 0, 10.0, 0.5, 0),
+            cv2.getGaborKernel((21, 21), 4.0, np.pi/4, 10.0, 0.5, 0)
+        ]
+        texture_scores = []
+        for kernel in kernels:
+            filtered = cv2.filter2D(normalized, cv2.CV_64F, kernel)
+            texture_scores.append(np.std(filtered))
+        texture_score = np.mean(texture_scores)
         
-        # Enhanced texture analysis
-        # Gabor filter for skin texture analysis
-        ksize = 31
-        sigma = 3.0
-        theta = 0
-        lambda_ = 10.0
-        gamma = 0.5
-        kernel = cv2.getGaborKernel((ksize, ksize), sigma, theta, lambda_, gamma, 0)
-        gabor = cv2.filter2D(normalized, cv2.CV_64F, kernel)
-        texture_score = np.std(gabor)
-        
-        # Multi-scale Laplacian analysis
-        laplacian_fine = cv2.Laplacian(normalized, cv2.CV_64F, ksize=1).var()
-        laplacian_coarse = cv2.Laplacian(normalized, cv2.CV_64F, ksize=3).var()
-        
-        # Calculate face proportions
-        height, width = face_img.shape[:2]
-        aspect_ratio = width / height
-        face_size = width * height
-        
-        # Calculate skin smoothness using local variance
+        # Enhanced skin smoothness analysis
         local_var = cv2.blur(cv2.multiply(normalized, normalized), (5, 5)) - cv2.multiply(cv2.blur(normalized, (5, 5)), cv2.blur(normalized, (5, 5)))
         smoothness_score = np.mean(local_var)
         
-        # Print debug info
-        print(f"Debug - Edge density (fine/coarse): {edge_density_fine:.6f}/{edge_density_coarse:.6f}")
-        print(f"Debug - Texture score: {texture_score:.2f}")
-        print(f"Debug - Laplacian (fine/coarse): {laplacian_fine:.2f}/{laplacian_coarse:.2f}")
-        print(f"Debug - Smoothness score: {smoothness_score:.2f}")
+        # Calculate face proportions
+        aspect_ratio = width / height
         
-        # Final extremely precise age estimation based on observed values
-        if edge_density_fine < 28 and edge_density_coarse < 15:  # Young skin characteristics
-            if aspect_ratio > 0.85 and face_size > 20000:
-                return "0-12"  # Young children have rounder faces
-            elif (19 < edge_density_fine < 28 and 8 < edge_density_coarse < 15 and 
-                  800 < texture_score < 1400 and smoothness_score < 5 and
-                  laplacian_fine < 150 and laplacian_coarse < 2000):
-                return "13-19"  # Teen skin characteristics
-            else:
-                return "20-25"
-        elif edge_density_fine < 32 and edge_density_coarse < 20:  # Adult skin characteristics
-            if texture_score < 1200 and smoothness_score < 7:
-                return "26-35"
-            else:
-                return "36-45"
-        elif edge_density_fine < 35 and edge_density_coarse < 25:
-            return "46-55"
+        # Calculate wrinkle detection
+        laplacian = cv2.Laplacian(normalized, cv2.CV_64F)
+        wrinkle_score = np.mean(np.abs(laplacian))
+        
+        # Calculate confidence and determine age range
+        age_range = ""
+        
+        # Refined age estimation based on multiple features with stricter thresholds
+        if edge_density < 0.03 and texture_score < 600 and smoothness_score < 2 and wrinkle_score < 80:
+            age_range = "0-12"
+        elif edge_density < 0.05 and texture_score < 800 and smoothness_score < 3 and wrinkle_score < 120:
+            age_range = "13-19"
+        elif edge_density < 0.07 and texture_score < 1000 and smoothness_score < 4 and wrinkle_score < 160:
+            age_range = "20-25"
+        elif edge_density < 0.09 and texture_score < 1200 and smoothness_score < 5 and wrinkle_score < 200:
+            age_range = "26-35"
+        elif edge_density < 0.11 and texture_score < 1400 and smoothness_score < 6 and wrinkle_score < 240:
+            age_range = "36-45"
+        elif edge_density < 0.13 and texture_score < 1600 and smoothness_score < 7 and wrinkle_score < 280:
+            age_range = "46-55"
         else:
-            return "55+"
+            age_range = "55+"
+        
+        # Add current age estimate to history
+        self.age_history.append(age_range)
+        if len(self.age_history) > self.max_history:
+            self.age_history.pop(0)
+        
+        # Use majority voting from history for more stable results
+        if len(self.age_history) >= 3:
+            from collections import Counter
+            age_range = Counter(self.age_history).most_common(1)[0][0]
+        
+        # Only print debug info every 30 frames
+        if hasattr(self, 'frame_counter'):
+            self.frame_counter += 1
+            if self.frame_counter % 30 == 0:
+                print(f"Age: {age_range}")
+                print(f"Edge Density: {edge_density:.3f}, Texture: {texture_score:.1f}, Smoothness: {smoothness_score:.1f}, Wrinkles: {wrinkle_score:.1f}")
+        else:
+            self.frame_counter = 0
+        
+        return age_range
     
     def process_frame(self, frame):
         """Process a single frame for face detection and recognition."""
+        # Resize frame for faster processing
+        max_size = 800
+        height, width = frame.shape[:2]
+        scale = max_size / max(height, width)
+        frame = cv2.resize(frame, (int(width * scale), int(height * scale)))
+        
         # Detect faces using OpenCV
         faces, gray = self.detect_faces(frame)
         
@@ -148,10 +203,8 @@ class AdvancedFaceDetector:
             name = "Unknown"
             if self.known_face_images:
                 label, confidence = self.face_recognizer.predict(face_gray)
-                print(f"Recognition confidence: {confidence:.2f} for label {label}")
                 if confidence < 30:  # Even stricter threshold
                     name = self.known_face_names[label]
-                    print(f"Recognized as {name} with confidence {confidence:.2f}")
             
             # Estimate age
             age_range = self.estimate_age(face_img)
@@ -225,15 +278,15 @@ def init_camera():
             if success:
                 print(f"Successfully connected to camera {idx}")
                 
-                # Set camera properties
+                # Set camera properties for better performance
                 print("Configuring camera settings...")
-                video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                video_capture.set(cv2.CAP_PROP_FRAME_WIDTH, 640)  # Reduced resolution
+                video_capture.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 video_capture.set(cv2.CAP_PROP_FPS, 30)
                 
                 # Wait for camera to initialize
                 print("Waiting for camera to initialize...")
-                time.sleep(2)
+                time.sleep(1)  # Reduced wait time
                 return video_capture
             else:
                 print(f"Camera {idx} opened but couldn't read frames consistently")
@@ -270,7 +323,7 @@ def main():
             
             # Skip first few frames to allow camera to stabilize
             frame_counter += 1
-            if frame_counter < 10:
+            if frame_counter < 5:  # Reduced initial frame skip
                 continue
             
             if not ret or frame is None:
@@ -286,8 +339,8 @@ def main():
             # Display the frame
             cv2.imshow('Advanced Face Recognition System', processed_frame)
 
-            # Handle keyboard input (wait for 30ms)
-            key = cv2.waitKey(30) & 0xFF
+            # Handle keyboard input (wait for 1ms instead of 30ms)
+            key = cv2.waitKey(1) & 0xFF
 
             if key == ord('q'):  # Quit
                 break
